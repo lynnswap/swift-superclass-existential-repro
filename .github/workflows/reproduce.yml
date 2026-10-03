@@ -1,0 +1,97 @@
+name: Compare Swift runtimes
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build on ${{ matrix.label }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS 26
+            runner: macos-26
+            artifact: macos26
+            developer-directory: /Applications/Xcode_26.6.app/Contents/Developer
+          - label: macOS 27
+            runner: xcode-27
+            artifact: macos27
+            developer-directory: /Applications/Xcode_27.2.app/Contents/Developer
+    env:
+      DEVELOPER_DIR: ${{ matrix.developer-directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build Debug and Release probes
+        run: python3 scripts/probes.py build --output .artifacts/probes
+      - name: Archive executable permissions and build metadata
+        run: tar -czf .artifacts/probes.tar.gz -C .artifacts probes
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: probes-${{ matrix.artifact }}
+          path: .artifacts/probes.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: build-diagnostics-${{ matrix.artifact }}
+          path: |
+            .artifacts/probes/*.log
+            .artifacts/probes/build.json
+            .artifacts/probes/infrastructure-error.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  reproduce:
+    name: ${{ matrix.label }}
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: Xcode 26.6 build on macOS 26
+            runner: macos-26
+            artifact: macos26
+            report: build26-run26
+          - label: Same Xcode 26.6 binaries on macOS 27
+            runner: xcode-27
+            artifact: macos26
+            report: build26-run27
+          - label: Xcode 27.2 build on macOS 27
+            runner: xcode-27
+            artifact: macos27
+            report: build27-run27
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: probes-${{ matrix.artifact }}
+          path: .artifacts
+      - name: Extract the original binaries
+        run: tar -xzf .artifacts/probes.tar.gz -C .artifacts
+      - name: Run isolated probes and controls
+        run: python3 scripts/probes.py run --bundle .artifacts/probes --output .artifacts/results
+      - name: Preserve outcomes even when the bug reproduces
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: results-${{ matrix.report }}
+          path: .artifacts/results
+          if-no-files-found: warn
+          retention-days: 14
